@@ -1,6 +1,7 @@
 import os
-from token import OP
 from dotenv import load_dotenv
+from dataclasses import dataclass
+from typing import Optional
 
 # Load environment variables from .env file
 load_dotenv()
@@ -35,14 +36,6 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 )
-
-# ====================================
-# AI Parser Configuration
-# ====================================
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-LLM_PROVIDER = "openai"
-MODEL = "gpt-3.5-turbo"
-MAX_TOKENS = 1500
 
 # ====================================
 # Simple Parser Configuration
@@ -81,4 +74,64 @@ DOMAIN_PATTERNS = {
     "nykaafashion.com": [r"/products/.*", r"/p/.*"],
     "westside.com": [r"/shop/.*", r"/products/.*"]
 }
+
+
+# ====================================
+# AI Parser Configuration
+# ====================================
+@dataclass
+class GeminiConfig:
+    api_key: str
+    model: str = "gemini-2.0-flash"
+
+@dataclass
+class MistralConfig:
+    api_key: str
+    model: str = "mistral-tiny"
+
+@dataclass
+class HuggingFaceConfig:
+    api_key: str
+    model: str = "mistralai/Mistral-7B-Instruct-v0.2"
+
+@dataclass
+class ClaudeConfig:
+    api_key: str
+    model: str = "claude-3-opus-20240229"
+    max_tokens: int = 1000
+
+@dataclass
+class ChatGPTConfig:
+    api_key: str
+    model: str = "gpt-4-turbo-preview"
+    max_tokens: int = 1000
+
+@dataclass
+class AIConfig:
+    provider: str
+    gemini: Optional[GeminiConfig] = None
+    mistral: Optional[MistralConfig] = None
+    huggingface: Optional[HuggingFaceConfig] = None
+    claude: Optional[ClaudeConfig] = None
+    chatgpt: Optional[ChatGPTConfig] = None
+
+# AI Configuration
+AI_PROVIDER = "gemini"  # Options: "gemini", "mistral", "huggingface", "claude", "chatgpt"
+
+# Individual API Keys for each provider
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
+CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY", "")
+
+# Default AI configuration
+DEFAULT_AI_CONFIG = AIConfig(
+    provider=AI_PROVIDER,
+    gemini=GeminiConfig(api_key=GEMINI_API_KEY),
+    mistral=MistralConfig(api_key=MISTRAL_API_KEY),
+    huggingface=HuggingFaceConfig(api_key=HUGGINGFACE_API_KEY),
+    claude=ClaudeConfig(api_key=CLAUDE_API_KEY),
+    chatgpt=ChatGPTConfig(api_key=CHATGPT_API_KEY)
+)
 

@@ -1,6 +1,7 @@
 from enum import Enum
 from .simple_parser import SimpleParser
-from .ai_parser import AIParser
+# from .ai_parser_old import AIParser
+from .ai_parser_langchain import AIParser
 from .config_parser import ConfigParser
 
 class ParserType(Enum):
