@@ -1,4 +1,5 @@
 import os
+from token import OP
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -34,6 +35,14 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 )
+
+# ====================================
+# AI Parser Configuration
+# ====================================
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_PROVIDER = "openai"
+MODEL = "gpt-3.5-turbo"
+MAX_TOKENS = 1500
 
 # ====================================
 # Simple Parser Configuration

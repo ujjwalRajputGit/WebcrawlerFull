@@ -1,6 +1,6 @@
 from enum import Enum
 from .simple_parser import SimpleParser
-# from .ai_parser import AIParser
+from .ai_parser import AIParser
 from .config_parser import ConfigParser
 
 class ParserType(Enum):
@@ -11,7 +11,7 @@ class ParserType(Enum):
     # Optimized parser selection using dictionary mapping
 PARSERS = {
     ParserType.SIMPLE: SimpleParser,
-    # ParserType.AI: AIParser,
+    ParserType.AI: AIParser,
     ParserType.CONFIG: ConfigParser,
 }
 

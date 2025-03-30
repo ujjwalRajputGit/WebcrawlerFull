@@ -12,9 +12,11 @@ def main():
 
     simple_parser = get_parser(ParserType.SIMPLE)
     config_parser = get_parser(ParserType.CONFIG)
+    ai_parser = get_parser(ParserType.AI)
 
     active_parser = simple_parser
     # active_parser = config_parser
+    active_parser = ai_parser
 
     if html_content:
         product_urls = active_parser.parse(html_content, base_url)
