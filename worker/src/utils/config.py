@@ -68,6 +68,12 @@ DOMAIN_PATTERNS = {
         r"/detail/[a-zA-Z0-9-]+",    # Detail pages
         r"/product(?:-[a-zA-Z0-9]+)+",  # Hyphen-separated product IDs
         r"/products/[0-9]+"           # Numeric product pages
+        r"/product-detail/\d+",   # The pattern from your example
+        r"/pd/\d+",               # Common product detail
+        r"/item-detail/\d+",      # Item detail
+        r"/catalog/product/view/id/\d+", # Magento style
+        r"/product/view/id/\d+",  # Alternative product view
+        r"/productdetails/\d+"    # No hyphen variant
     ],
     "virgio.com": [r"/product/\d+",r"/products/\d+", r"/item/\w+", r"/p/\d+"],
     "tatacliq.com": [r"/product/.*",r"/products/\d+", r"/pdp/.*"],
@@ -134,4 +140,23 @@ DEFAULT_AI_CONFIG = AIConfig(
     claude=ClaudeConfig(api_key=CLAUDE_API_KEY),
     chatgpt=ChatGPTConfig(api_key=CHATGPT_API_KEY)
 )
+
+# ====================================
+# Advanced Crawler Configuration
+# ====================================
+MAX_CRAWL_DEPTH = 3  # Maximum depth for pagination
+CRAWL_DELAY = 0.5  # Delay between requests in seconds
+
+# ====================================
+# Celery Configuration
+# ====================================
+if REDIS_PASSWORD:
+    CELERY_BROKER_URL = f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+    CELERY_RESULT_BACKEND = f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+else:
+    CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+    CELERY_RESULT_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+
+CELERY_RESULT_EXPIRES = 3600 
+
 

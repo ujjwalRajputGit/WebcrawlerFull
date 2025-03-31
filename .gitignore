@@ -108,3 +108,5 @@ venv.bak/
 .idea/*
 output/crawler_urls_virgio_com_2025-03-30 19:34:13.214588.json
 output/crawler_urls_virgio_com_2025-03-30 19:34:13.215991.csv
+.vscode/settings.json
+message.txt

@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from typing import List
 from langchain_community.chat_models import ChatOpenAI, ChatAnthropic
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
-# from langchain.schema import HumanMessage, SystemMessage
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from langchain.memory import ConversationBufferMemory
@@ -28,20 +27,36 @@ class BaseAIParser(ABC):
         
         # Create a more detailed prompt template
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert web crawler specializing in e-commerce sites.
-            Your task is to extract product URLs from HTML content.
+            ("system", """You are a specialized web scraper assistant focused on e-commerce sites. 
+            Your task is to analyze HTML content and extract product URLs.
+
+            Important considerations:
+            1. Look for product URL patterns like: 
+               - /product/{id}
+               - /product-detail/{id}
+               - /p/{id}
+               - /item/{id}
+               - /products/{slug}
+               - Any URL that clearly leads to a product page
+               
+            2. Look for pagination links:
+               - URLs with page=number parameters
+               - URLs with /page/number patterns
+               - Next/Previous page buttons
+               
+            3. Be thorough in your analysis of the HTML structure
             
-            Guidelines:
-            1. Only extract URLs that point to product pages
-            2. Ensure URLs are complete and valid
-            3. Remove any duplicate URLs
-            4. Consider the base URL when processing relative URLs
-            5. Explain your reasoning for selected URLs
+            {format_instructions}
+            """),
+            ("human", """I need to extract all product URLs from this HTML content.
             
-            {format_instructions}"""),
-            ("human", """Extract product URLs from this HTML content.
             Base URL: {base_url}
-            HTML: {html}""")
+            
+            HTML content: {html}
+            
+            Please analyze the HTML, find all product URLs, and explain your reasoning.
+            Also note any pagination links you see that could lead to more products.
+            """),
         ])
 
     @abstractmethod

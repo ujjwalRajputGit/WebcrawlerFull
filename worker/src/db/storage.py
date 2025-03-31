@@ -2,8 +2,8 @@ import csv
 import json
 
 from utils.config import OUTPUT_DIR, SAVE_IN_JSON, SAVE_IN_CSV
-from .redis_client import redis_client
-from .mongo_client import db
+from db.redis_client import redis_client
+from db.mongo_client import db
 from utils.logger import get_logger
 from datetime import datetime
 

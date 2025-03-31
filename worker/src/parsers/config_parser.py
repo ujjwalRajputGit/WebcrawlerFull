@@ -1,5 +1,5 @@
 import re
-from parsers import pattern_parser
+from ._pattern_parser import parse
 from urllib.parse import urlparse
 from utils.logger import get_logger
 from utils.config import DOMAIN_PATTERNS
@@ -38,7 +38,7 @@ class ConfigParser:
 
         logger.debug(f"Domain: {domain_pattern_key}, Patterns: {patterns}")
 
-        return pattern_parser.parse(html, domain, patterns)
+        return parse(html, domain, patterns)
 
 
 

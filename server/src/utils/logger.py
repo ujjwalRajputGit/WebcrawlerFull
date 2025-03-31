@@ -22,4 +22,4 @@ def get_logger(name: str):
         # Add the handler to the logger
         logger.addHandler(console_handler)
 
-    return logger
+    return logger 

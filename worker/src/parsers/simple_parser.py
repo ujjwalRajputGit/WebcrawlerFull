@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin
-from parsers import pattern_parser
+from ._pattern_parser import parse
 from utils.config import PATTERNS
 from utils.logger import get_logger
 from typing import List
@@ -53,7 +53,7 @@ class SimpleParser:
             List[str]: List of unique product URLs
         """
 
-        return pattern_parser.parse(html, base_url, self.patterns)
+        return parse(html, base_url, self.patterns)
     
 
 
