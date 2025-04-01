@@ -1,13 +1,15 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
-from tasks import crawl_task, celery_app  # Import celery_app too
+from tasks import crawl_task, celery_app
+from utils.logger import get_logger
+from db.storage import Storage
 from db.redis_client import redis_client
-from utils.logger import get_logger  # Updated import path
 from utils.config import (
     REDIS_HOST, REDIS_PORT, 
     CORS_ORIGINS  # Import server-specific configs
 )
+from urllib.parse import unquote
 
 app = FastAPI(
     title="Web Crawler API",
@@ -25,13 +27,6 @@ app.add_middleware(
 )
 
 logger = get_logger(__name__)
-
-try:
-    # Test Redis connection
-    redis_ping = redis_client.ping()
-    logger.info(f"Redis connection test: {redis_ping}")
-except Exception as e:
-    logger.error(f"Failed to connect to Redis: {e}")
 
 @app.get("/")
 def read_root():
@@ -143,3 +138,64 @@ def health_check():
             "redis": redis_status
         }
     }
+
+@app.get("/urls/{task_id}/{domain:path}")
+def get_urls(task_id: str, domain: str):
+    """
+    Get crawled URLs for a specific task and domain.
+    First tries Redis, then falls back to MongoDB.
+    
+    Args:
+        task_id (str): The ID of the crawl task
+        domain (str): The domain that was crawled (can be full URL)
+        
+    Returns:
+        dict: URLs and metadata for the domain
+    """
+    try:
+        # Decode the URL-encoded domain
+        domain = unquote(domain)
+        
+        # Initialize Storage class
+        storage = Storage()
+        
+        # Try getting from Redis first
+        redis_urls = storage.get_temp(domain, task_id)
+        
+        if redis_urls:
+            logger.info(f"Found {len(redis_urls)} URLs in Redis for task {task_id}, domain {domain}")
+            return {
+                "source": "redis",
+                "task_id": task_id,
+                "domain": domain,
+                "urls_count": len(redis_urls),
+                "urls": redis_urls
+            }
+            
+        # If not in Redis, try MongoDB
+        mongo_result = storage.get_from_mongo(domain, task_id)
+        
+        if mongo_result:
+            urls = mongo_result["urls"]
+            logger.info(f"Found {len(urls)} URLs in MongoDB for task {task_id}, domain {domain}")
+            return {
+                "source": "mongodb",
+                "task_id": task_id,
+                "domain": domain,
+                "urls_count": len(urls),
+                "urls": urls,
+                "timestamp": mongo_result["timestamp"]
+            }
+            
+        # If not found in either storage
+        raise HTTPException(
+            status_code=404,
+            detail=f"No URLs found for task {task_id} and domain {domain}"
+        )
+            
+    except Exception as e:
+        logger.error(f"Error retrieving URLs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve URLs: {str(e)}"
+        )

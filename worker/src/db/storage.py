@@ -1,12 +1,13 @@
 import csv
 import json
+from typing import List
 
 from utils.config import OUTPUT_DIR, SAVE_IN_JSON, SAVE_IN_CSV
 from db.redis_client import redis_client
 from db.mongo_client import db
 from utils.logger import get_logger
 from datetime import datetime
-from urllib.parse import urlparse
+from tldextract import extract
 
 logger = get_logger(__name__)
 
@@ -58,9 +59,11 @@ class Storage:
         Returns:
             str: The unique ID for the domain.
         """
-        parsed_url = urlparse(domain)
+        parsed_url = extract(domain)
+        logger.debug(f"Parsed URL: {parsed_url}")
+        logger.debug(f"Simplifying domain: {domain} to {parsed_url.domain}.{parsed_url.suffix}")
         # Use the domain as the unique ID
-        return parsed_url.netloc.replace(".", "_")
+        return f"{parsed_url.domain}.{parsed_url.suffix}".replace(".", "_")
     
     def _get_redis_key(self, domain, taskId):
         """
@@ -88,18 +91,6 @@ class Storage:
         # Use a single collection for all domains
         return self._get_root_name()
     
-    # def _get_mongo_document_id(self, domain):
-    #     """
-    #     Generate a MongoDB document ID based on the domain.
-        
-    #     Args:
-    #         domain (str): The domain being crawled.
-
-    #     Returns:
-    #         str: The MongoDB document ID.
-    #     """
-    #     # Use the domain as the document ID
-    #     return self._get_id_from_domain(domain)
     
     def _get_file_name(self, domain, taskId, file_type):
         """
@@ -235,3 +226,39 @@ class Storage:
                 writer.writerow([url])
 
         logger.info(f"Saved {len(urls)} URLs to {filepath}.")
+
+    def get_from_mongo(self, domain: str, task_id: str) -> List[str]:
+        """
+        Get URLs from MongoDB for a specific domain and task.
+        
+        Args:
+            domain (str): The domain being crawled
+            task_id (str): The ID of the task
+            
+        Returns:
+            List[str]: List of URLs stored in MongoDB
+        """
+        try:
+            collection = db[self._get_mongo_collection_name()]
+            simplified_domain = self._simplify_domain(domain)
+            
+            mongo_doc = collection.find_one({
+                "_id": task_id,
+                "domain": simplified_domain
+            })
+            
+            if mongo_doc:
+                urls = mongo_doc.get("urls", [])
+                timestamp = mongo_doc.get("timestamp")
+                logger.info(f"Retrieved {len(urls)} URLs from MongoDB for {domain}")
+                return {
+                    "urls": urls,
+                    "timestamp": timestamp
+                }
+            
+            logger.info(f"No URLs found in MongoDB for {domain}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve URLs from MongoDB: {e}")
+            return None
