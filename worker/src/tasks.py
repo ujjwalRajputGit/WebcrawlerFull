@@ -1,4 +1,4 @@
-from tasks_signature import crawl_task
+from celery_worker import celery_app
 from utils.fetcher import fetch_page
 from parsers import ParserType, get_parser
 from db.storage import Storage
@@ -12,113 +12,150 @@ logger = get_logger(__name__)
 # Initialize storage
 storage = Storage()
 
-@crawl_task.app.task(bind=True, name=crawl_task.name)
-def crawl_task_impl(self, domains: List[str], max_depth: int = 3) -> Dict:
-    """
-    Implementation of the crawl_task.
-    This replaces the placeholder in worker/tasks_signature.py.
-    """
-    start_time = time.time()
-    all_urls = {}
 
-    # Initialize all three parsers
-    simple_parser = get_parser(ParserType.SIMPLE)
-    config_parser = get_parser(ParserType.CONFIG) 
-    ai_parser = get_parser(ParserType.AI)
+# Define the task with the same name as in the server
+@celery_app.task(name="tasks.crawl", bind=True, 
+                 autoretry_for=(Exception,), 
+                 retry_kwargs={'max_retries': 1, 'countdown': 10},
+                 rate_limit='10/m')  # Limit to 10 tasks per minute
+def crawl_task(self, domains: List[str], max_depth: int = 3) -> Dict:
+    """
+    Implementation of the crawl task.
+    This task must be registered with the same name as in the server project.
+    """
+    try:
+        start_time = time.time()
+        all_urls = {}
+        task_id = self.request.id  # Get the task ID
 
-    for domain in domains:
-        logger.info(f"🕵️‍♂️ Starting deep crawl for domain: {domain}")
-        
-        # Track visited URLs to avoid duplicates
-        visited_urls = set()
-        urls_to_visit = [domain]
-        
-        # Store all discovered product URLs for this domain
-        domain_product_urls = set()
-        
-        # Extract domain for checking internal links
-        domain_netloc = urlparse(domain).netloc
-        
-        # Control crawl depth
-        current_depth = 0
-        
-        while urls_to_visit and current_depth < max_depth:
-            current_batch = urls_to_visit.copy()
-            urls_to_visit = []
+        # Update task state to show it's starting
+        self.update_state(state='PROGRESS', meta={
+            'status': 'starting',
+            'task_id': task_id,  # Include task ID in status updates
+            'domains': domains,
+            'max_depth': max_depth
+        })
+
+        # Initialize all three parsers
+        simple_parser = get_parser(ParserType.SIMPLE)
+        config_parser = get_parser(ParserType.CONFIG) 
+        ai_parser = get_parser(ParserType.AI)
+
+        for i, domain in enumerate(domains):
+            logger.info(f"🕵️‍♂️ Starting deep crawl for domain: {domain}")
             
-            logger.info(f"Crawling depth {current_depth}: Processing {len(current_batch)} URLs")
+            # Update task state to show which domain is being processed
+            self.update_state(state='PROGRESS', meta={
+                'status': 'crawling',
+                'domain': domain,
+                'domain_index': i + 1,
+                'domain_count': len(domains),
+                'urls_discovered': sum(len(urls) for urls in all_urls.values())
+            })
             
-            for url in current_batch:
-                if url in visited_urls:
-                    continue
-                    
-                try:
-                    logger.info(f"Fetching page: {url}")
-                    html = fetch_page(url)
-                    visited_urls.add(url)
-                    
-                    if not html:
-                        logger.warning(f"⚠️ No HTML content for {url}, skipping.")
+            # Track visited URLs to avoid duplicates
+            visited_urls = set()
+            urls_to_visit = [domain]
+            
+            # Store all discovered product URLs for this domain
+            domain_product_urls = set()
+            
+            # Extract domain for checking internal links
+            domain_netloc = urlparse(domain).netloc
+            
+            # Control crawl depth
+            current_depth = 0
+            
+            while urls_to_visit and current_depth < max_depth:
+                current_batch = urls_to_visit.copy()
+                urls_to_visit = []
+                
+                logger.info(f"Crawling depth {current_depth}: Processing {len(current_batch)} URLs")
+                
+                for url in current_batch:
+                    if url in visited_urls:
                         continue
-                    
-                    # Use all three parsers to extract product URLs
-                    urls_simple = simple_parser.parse(html, url)
-                    urls_config = config_parser.parse(html, url)
-                    urls_ai = ai_parser.parse(html, url)
-                    
-                    # Combine all results
-                    product_urls = set(urls_simple + urls_config + urls_ai)
-                    
-                    if product_urls:
-                        domain_product_urls.update(product_urls)
-                        logger.info(f"Found {len(product_urls)} product URLs on {url}")
                         
-                    # Generate and add sequential product URLs based on discovered patterns
-                    sequential_urls = generate_sequential_urls(product_urls)
-                    if sequential_urls:
-                        domain_product_urls.update(sequential_urls)
-                        logger.info(f"Generated {len(sequential_urls)} additional sequential URLs")
-                    
-                    # Look for pagination links
-                    pagination_urls = find_pagination_links(html, url, domain_netloc)
-                    
-                    # Add pagination URLs to visit queue for next depth
-                    for pagination_url in pagination_urls:
-                        if pagination_url not in visited_urls:
-                            urls_to_visit.append(pagination_url)
-                    
-                    logger.info(f"Found {len(pagination_urls)} pagination links to follow")
-                    
-                except Exception as e:
-                    logger.error(f"🔥 Error crawling {url}: {e}")
+                    try:
+                        logger.info(f"Fetching page: {url}")
+                        html = fetch_page(url)
+                        visited_urls.add(url)
+                        
+                        if not html:
+                            logger.warning(f"⚠️ No HTML content for {url}, skipping.")
+                            continue
+                        
+                        # Use all three parsers to extract product URLs
+                        urls_simple = simple_parser.parse(html, url)
+                        urls_config = config_parser.parse(html, url)
+                        urls_ai = ai_parser.parse(html, url)
+                        
+                        # Combine all results
+                        product_urls = set(urls_simple + urls_config + urls_ai)
+                        
+                        if product_urls:
+                            domain_product_urls.update(product_urls)
+                            logger.info(f"Found {len(product_urls)} product URLs on {url}")
+                            
+                        # Generate and add sequential product URLs based on discovered patterns
+                        sequential_urls = generate_sequential_urls(product_urls)
+                        if sequential_urls:
+                            domain_product_urls.update(sequential_urls)
+                            logger.info(f"Generated {len(sequential_urls)} additional sequential URLs")
+                        
+                        # Look for pagination links
+                        pagination_urls = find_pagination_links(html, url, domain_netloc)
+                        
+                        # Add pagination URLs to visit queue for next depth
+                        for pagination_url in pagination_urls:
+                            if pagination_url not in visited_urls:
+                                urls_to_visit.append(pagination_url)
+                        
+                        logger.info(f"Found {len(pagination_urls)} pagination links to follow")
+                        
+                    except Exception as e:
+                        logger.error(f"🔥 Error crawling {url}: {e}")
+                
+                # Move to next depth
+                current_depth += 1
+                
+                # Periodically save URLs to avoid data loss
+                if domain_product_urls:
+                    storage.save(domain, task_id, list(domain_product_urls))
+                    logger.info(f"Saved {len(domain_product_urls)} URLs at depth {current_depth}")
             
-            # Move to next depth
-            current_depth += 1
-            
-            # Periodically save URLs to avoid data loss
+            # Final report
             if domain_product_urls:
-                storage.save(domain, list(domain_product_urls))
-                logger.info(f"Saved {len(domain_product_urls)} URLs at depth {current_depth}")
-        
-        # Final report
-        if domain_product_urls:
-            logger.info(f"✅ Total unique product URLs for {domain}: {len(domain_product_urls)}")
-            all_urls[domain] = list(domain_product_urls)
-        else:
-            logger.warning(f"No product URLs found for {domain}")
+                logger.info(f"✅ Total unique product URLs for {domain}: {len(domain_product_urls)}")
+                all_urls[domain] = list(domain_product_urls)
+            else:
+                logger.warning(f"No product URLs found for {domain}")
 
-    end_time = time.time()
-    duration = end_time - start_time
+            # Update when domain is complete
+            self.update_state(state='PROGRESS', meta={
+                'status': 'domain_complete',
+                'domain': domain,
+                'domain_index': i + 1,
+                'domain_count': len(domains),
+                'urls_discovered': sum(len(urls) for urls in all_urls.values())
+            })
 
-    logger.info(f"✅ Deep crawl completed in {duration:.2f} seconds")
+        end_time = time.time()
+        duration = end_time - start_time
 
-    return {
-        "status": "completed",
-        "duration": f"{duration:.2f} seconds",
-        "domains": domains,
-        "urls_count": {domain: len(urls) for domain, urls in all_urls.items()},
-        "total_urls": sum(len(urls) for urls in all_urls.values())
-    }
+        logger.info(f"✅ Deep crawl completed in {duration:.2f} seconds")
+
+        return {
+            "status": "completed",
+            "task_id": task_id,  # Include task ID in final result
+            "duration": f"{duration:.2f} seconds",
+            "domains": domains,
+            "urls_count": {domain: len(urls) for domain, urls in all_urls.items()},
+            "total_urls": sum(len(urls) for urls in all_urls.values())
+        }
+    except Exception as e:
+        logger.error(f"Task {self.request.id} failed: {str(e)}")
+        raise
 
 def find_pagination_links(html: str, base_url: str, domain_netloc: str) -> List[str]:
     """

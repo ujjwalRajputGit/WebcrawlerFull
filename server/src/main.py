@@ -1,7 +1,7 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
-from tasks import crawl_task  # Updated import path
+from tasks import crawl_task, celery_app  # Import celery_app too
 from db.redis_client import redis_client
 from utils.logger import get_logger  # Updated import path
 from utils.config import (
@@ -42,7 +42,7 @@ def read_root():
     }
 
 @app.post("/crawl/")
-def trigger_crawl(domains: list[str], background_tasks: BackgroundTasks, max_depth: int = 3):
+def trigger_crawl(domains: list[str], max_depth: int = 3):
     """
     Trigger the crawler for given domains.
 
@@ -59,9 +59,6 @@ def trigger_crawl(domains: list[str], background_tasks: BackgroundTasks, max_dep
         
         logger.info(f"Started crawling task {task.id} for domains: {domains}")
         
-        # Add to background task queue
-        background_tasks.add_task(monitor_task_status, task.id)
-        
         return {
             "task_id": task.id,
             "status": "Crawling started",
@@ -72,50 +69,39 @@ def trigger_crawl(domains: list[str], background_tasks: BackgroundTasks, max_dep
         logger.error(f"Error starting task: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start crawl task: {str(e)}")
 
-@app.get("/tasks/{task_id}")
+@app.get("/task/{task_id}")
 def get_task_status(task_id: str):
     """
-    Get the status of a crawling task.
+    Get the status of a task.
     
     Args:
-        task_id (str): Celery task ID.
+        task_id (str): The ID of the task.
         
     Returns:
         dict: Task status information.
     """
-    task_result = AsyncResult(task_id)
+    task = AsyncResult(task_id, app=celery_app)
     
     response = {
         "task_id": task_id,
-        "status": task_result.status,
+        "status": task.status,
     }
     
-    # Add result if task is completed
-    if task_result.ready():
-        if task_result.successful():
-            response["result"] = task_result.result
-        else:
-            response["error"] = str(task_result.result)
+    # Add more information based on task status
+    if task.status == 'PENDING':
+        response['info'] = 'Task is waiting for execution'
+    elif task.status == 'STARTED':
+        response['info'] = 'Task has been started'
+    elif task.status == 'PROGRESS':
+        response['info'] = task.info
+    elif task.status == 'SUCCESS':
+        response['result'] = task.result
+    elif task.status == 'FAILURE':
+        response['error'] = str(task.result)
     
     return response
 
-async def monitor_task_status(task_id: str):
-    """
-    Monitor task status and log updates.
-    
-    Args:
-        task_id (str): Celery task ID to monitor.
-    """
-    task_result = AsyncResult(task_id)
-    redis_key = f"task_status:{task_id}"
-    
-    # Store initial status
-    redis_client.set(redis_key, task_result.status)
-    redis_client.expire(redis_key, 86400)  # Expire in 24 hours
-    
-    logger.info(f"Started monitoring task: {task_id}, Status: {task_result.status}")
-
-@app.delete("/tasks/{task_id}")
+@app.delete("/task/{task_id}")
 def revoke_task(task_id: str, terminate: bool = False):
     """
     Revoke a running task.
@@ -127,7 +113,7 @@ def revoke_task(task_id: str, terminate: bool = False):
     Returns:
         dict: Result of the operation.
     """
-    task = AsyncResult(task_id)
+    task = AsyncResult(task_id, app=celery_app)
     
     if task.state in ['PENDING', 'STARTED', 'RETRY']:
         task.revoke(terminate=terminate)

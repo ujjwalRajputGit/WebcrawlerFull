@@ -6,6 +6,7 @@ from db.redis_client import redis_client
 from db.mongo_client import db
 from utils.logger import get_logger
 from datetime import datetime
+from urllib.parse import urlparse
 
 logger = get_logger(__name__)
 
@@ -26,7 +27,7 @@ class Storage:
             raise ValueError("Output directory is not set. Please set OUTPUT_DIR in config.py.")
         self.output_dir = OUTPUT_DIR
 
-    def save(self, domain, urls):
+    def save(self, domain, taskId, urls):
         """
         Save the final product URLs to Redis, MongoDB, and files.
         
@@ -35,19 +36,19 @@ class Storage:
             urls (list): List of discovered product URLs.
         """
 
-        self.store_temp(domain, urls)
-        self.store_mongo(domain, urls)
+        self.store_temp(domain, taskId, urls)
+        self.store_mongo(domain, taskId, urls)
 
         if SAVE_IN_JSON:
-            self.save_to_json(domain, urls)
+            self.save_to_json(domain, taskId, urls)
         
         if SAVE_IN_CSV:
-            self.save_to_csv(domain, urls)
+            self.save_to_csv(domain, taskId, urls)
 
     def _get_root_name(self):
         return "crawler_urls"
     
-    def _get_id_from_domain(self, domain):
+    def _simplify_domain(self, domain):
         """
         Generate a unique ID based on the domain.
         
@@ -57,10 +58,11 @@ class Storage:
         Returns:
             str: The unique ID for the domain.
         """
+        parsed_url = urlparse(domain)
         # Use the domain as the unique ID
-        return domain.replace(".", "_")
+        return parsed_url.netloc.replace(".", "_")
     
-    def _get_redis_key(self, domain):
+    def _get_redis_key(self, domain, taskId):
         """
         Generate a Redis key based on the domain.
         
@@ -71,7 +73,7 @@ class Storage:
             str: The Redis key.
         """
         # Use a single key for all domains
-        return f"{self._get_root_name()}:{self._get_id_from_domain(domain)}"
+        return f"{self._get_root_name()}:{taskId}:{self._simplify_domain(domain)}"
 
     def _get_mongo_collection_name(self):
         """
@@ -86,20 +88,20 @@ class Storage:
         # Use a single collection for all domains
         return self._get_root_name()
     
-    def _get_mongo_document_id(self, domain):
-        """
-        Generate a MongoDB document ID based on the domain.
+    # def _get_mongo_document_id(self, domain):
+    #     """
+    #     Generate a MongoDB document ID based on the domain.
         
-        Args:
-            domain (str): The domain being crawled.
+    #     Args:
+    #         domain (str): The domain being crawled.
 
-        Returns:
-            str: The MongoDB document ID.
-        """
-        # Use the domain as the document ID
-        return self._get_id_from_domain(domain)
+    #     Returns:
+    #         str: The MongoDB document ID.
+    #     """
+    #     # Use the domain as the document ID
+    #     return self._get_id_from_domain(domain)
     
-    def _get_file_name(self, domain, file_type):
+    def _get_file_name(self, domain, taskId, file_type):
         """
         Generate a file name based on the domain and file type.
         
@@ -110,10 +112,10 @@ class Storage:
         Returns:
             str: The file name.
         """
-        return f"{self._get_root_name()}_{self._get_id_from_domain(domain)}_{datetime.now()}.{file_type}"
+        return f"{self._simplify_domain(domain)}-{taskId}.{file_type}"
 
     ## Store URLs temporarily in Redis
-    def store_temp(self, domain, urls):
+    def store_temp(self, domain, taskId, urls):
         """
         Store URLs temporarily in Redis to prevent duplicates.
         
@@ -122,7 +124,7 @@ class Storage:
             urls (list): List of discovered product URLs.
         """
 
-        redis_key = self._get_redis_key(domain)
+        redis_key = self._get_redis_key(domain, taskId)
 
         for url in urls:
             redis_client.sadd(redis_key, url)
@@ -131,7 +133,7 @@ class Storage:
         logger.info(f"Stored {len(urls)} URLs in Redis for {domain}.")
 
     ## Retrieve URLs from Redis
-    def get_temp(self, domain):
+    def get_temp(self, domain, taskId):
         """
         Get the list of URLs from Redis.
 
@@ -141,12 +143,12 @@ class Storage:
         Returns:
             list: List of URLs stored in Redis.
         """
-        redis_key = self._get_redis_key(domain)
+        redis_key = self._get_redis_key(domain, taskId)
         urls = redis_client.smembers(redis_key)
         return [url.decode('utf-8') for url in urls]
 
     ## Store URLs in MongoDB
-    def store_mongo(self, domain, urls):
+    def store_mongo(self, domain, taskId, urls):
         """
         Store URLs in MongoDB using one document per domain with URL array.
 
@@ -159,10 +161,10 @@ class Storage:
         collection = db[self._get_mongo_collection_name()]
 
         try:
-            documet_id = self._get_mongo_document_id(domain)
+            documet_id = taskId
 
             # Check if the domain document already exists
-            existing_doc = collection.find_one({"_id": documet_id})
+            existing_doc = collection.find_one({"_id": documet_id, "domain": self._simplify_domain(domain)})
 
             if existing_doc:
                 # Combine new URLs with existing ones, avoiding duplicates
@@ -186,7 +188,7 @@ class Storage:
                 # Create new document if it doesn't exist
                 collection.insert_one({
                     "_id": documet_id,
-                    "domain": domain,
+                    "domain": self._simplify_domain(domain),
                     "urls": urls,
                     "timestamp": datetime.now()
                 })
@@ -196,7 +198,7 @@ class Storage:
             logger.error(f"Failed to store URLs in MongoDB: {e}")
 
     ## Save to JSON
-    def save_to_json(self, domain, urls):
+    def save_to_json(self, domain, taskId, urls):
         """
         Save the final product URLs to a JSON file.
 
@@ -205,7 +207,7 @@ class Storage:
             urls (list): List of discovered product URLs.
             output_dir (str): Directory to save the file.
         """
-        filename = self._get_file_name(domain, "json")
+        filename = self._get_file_name(domain, taskId, "json")
         filepath = f"{self.output_dir}/{filename}"
         
         with open(filepath, "a") as file:
@@ -214,7 +216,7 @@ class Storage:
         logger.info(f"Saved {len(urls)} URLs to {filepath}.")
 
     ## Save to CSV
-    def save_to_csv(self, domain, urls):
+    def save_to_csv(self, domain, taskId, urls):
         """
         Save the final product URLs to a CSV file.
 
@@ -223,7 +225,7 @@ class Storage:
             urls (list): List of discovered product URLs.
             output_dir (str): Directory to save the file.
         """
-        filename = self._get_file_name(domain, "csv")
+        filename = self._get_file_name(domain, taskId, "csv")
         filepath = f"{self.output_dir}/{filename}"
 
         with open(filepath, "a", newline="") as file:

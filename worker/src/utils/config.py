@@ -23,9 +23,9 @@ MONGO_DB = os.getenv("MONGO_DB", "webcrawler")
 # ====================================
 # Storage Configuration
 # ====================================
-OUTPUT_DIR = "output"
-SAVE_IN_JSON = True
-SAVE_IN_CSV = True
+OUTPUT_DIR = "../../output"
+SAVE_IN_JSON = False
+SAVE_IN_CSV = False
 
 # ====================================
 # General Crawler Configurations
