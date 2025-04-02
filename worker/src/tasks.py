@@ -1,50 +1,218 @@
+import re
+import time
+import random
+from enum import Enum
 from celery_worker import celery_app
 from utils.fetcher import fetch_page
-from parsers import ParserType, get_parser
+from parsers import get_parser
+from constants import ParserType
 from db.storage import Storage
 from utils.logger import get_logger
-import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, urlsplit, urlunsplit
 from typing import Set, Dict, List
+from bs4 import BeautifulSoup
+from utils.config import PAGINATION_PATTERNS, PARSERS_TO_USE
 
 logger = get_logger(__name__)
 
 # Initialize storage
 storage = Storage()
 
+def normalize_url(url):
+    """Normalize URL to avoid duplicates."""
+    try:
+        # Parse the URL
+        parsed = urlsplit(url)
+        
+        # Remove common session/tracking parameters
+        query_params = parsed.query.split('&')
+        filtered_params = []
+        excluded_params = ['utm_source', 'utm_medium', 'utm_campaign', 'ref', 'session', 
+                          'tracking', 'click', 'affiliate', 'source']
+        
+        for param in query_params:
+            if param and '=' in param:
+                param_name = param.split('=')[0].lower()
+                if not any(excluded in param_name for excluded in excluded_params):
+                    filtered_params.append(param)
+        
+        new_query = '&'.join(filtered_params)
+        
+        # Reconstruct it with a consistent format
+        return urlunsplit((
+            parsed.scheme,
+            parsed.netloc.lower(),
+            parsed.path.rstrip('/'),
+            new_query,
+            ''  # No fragment
+        ))
+    except Exception as e:
+        logger.warning(f"Error normalizing URL {url}: {e}")
+        return url
+
+def find_urls(html: str, base_url: str, domain_netloc: str):
+    """
+    Unified URL discovery function with better performance.
+    
+    Args:
+        html (str): HTML content to parse
+        base_url (str): Base URL of the website
+        domain_netloc (str): Domain netloc for filtering internal links
+    
+    Returns:
+        list: Combined list of URLs to crawl
+    """
+    next_urls = set()
+    pagination_urls = set()
+    
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Find all links
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag.get('href')
+            if not href:
+                continue
+                
+            full_url = urljoin(base_url, href)
+            parsed_url = urlparse(full_url)
+            
+            # Keep only internal links
+            if not parsed_url.netloc or parsed_url.netloc == domain_netloc:
+                # Check if it's a pagination link
+                is_pagination = False
+                
+                # Check text for pagination indicators
+                text = a_tag.get_text().strip().lower()
+                pagination_indicators = ['next', 'page', '»', '>', 'load more', 'show more']
+                if any(indicator in text for indicator in pagination_indicators):
+                    is_pagination = True
+                
+                # Check URL patterns for pagination
+                if not is_pagination:
+                    for pattern in PAGINATION_PATTERNS:
+                        if re.search(pattern, href):
+                            is_pagination = True
+                            break
+                
+                if is_pagination:
+                    pagination_urls.add(full_url)
+                else:
+                    next_urls.add(full_url)
+        
+        # Return pagination URLs first (they get priority)
+        return list(pagination_urls) + list(next_urls - pagination_urls)
+        
+    except Exception as e:
+        logger.error(f"Error finding URLs: {e}")
+        return []
+
+def generate_sequential_urls(product_urls, max_urls=30):
+    """Generate sequential URLs based on patterns in discovered URLs."""
+    if len(product_urls) < 3:
+        return []
+    
+    sequential_urls = set()
+    
+    # Look for numeric patterns in URLs
+    number_patterns = [
+        r'/(\d+)(?:/|$)',     # /123/
+        r'p=(\d+)',           # p=123
+        r'page=(\d+)',        # page=123
+        r'-p(\d+)',           # -p123
+        r'_(\d+)\.html'       # _123.html
+    ]
+    
+    # Convert set to list for easier manipulation
+    product_urls_list = list(product_urls)
+    
+    # Sample some URLs to analyze patterns (don't check all to save time)
+    sample_size = min(10, len(product_urls_list))
+    sample_urls = random.sample(product_urls_list, sample_size)
+    
+    for pattern in number_patterns:
+        # Check if the pattern exists in our sample URLs
+        pattern_found = False
+        for url in sample_urls:
+            match = re.search(pattern, url)
+            if match:
+                pattern_found = True
+                num = int(match.group(1))
+                
+                # Generate URLs with nearby numbers
+                for i in range(1, 4):  # Generate fewer nearby numbers to reduce load
+                    # Try incrementing
+                    new_num = num + i
+                    new_url = re.sub(pattern, lambda m: m.group(0).replace(m.group(1), str(new_num)), url)
+                    sequential_urls.add(new_url)
+                    
+                    # Try decrementing if number is large enough
+                    if num > i:
+                        new_num = num - i
+                        new_url = re.sub(pattern, lambda m: m.group(0).replace(m.group(1), str(new_num)), url)
+                        sequential_urls.add(new_url)
+        
+        # If we found this pattern, don't check others to avoid excessive URLs
+        if pattern_found:
+            break
+    
+    # Filter out URLs that are already in product_urls and limit the number
+    new_urls = [url for url in sequential_urls if url not in product_urls]
+    return new_urls[:max_urls]
 
 # Define the task with the same name as in the server
 @celery_app.task(name="tasks.crawl", bind=True, 
                  autoretry_for=(Exception,), 
                  retry_kwargs={'max_retries': 1, 'countdown': 10},
-                 rate_limit='10/m')  # Limit to 10 tasks per minute
-def crawl_task(self, domains: List[str], max_depth: int = 3) -> Dict:
+                 rate_limit='10/m')
+def crawl_task(self, domains: List[str], max_depth:int) -> Dict:
     """
-    Implementation of the crawl task.
-    This task must be registered with the same name as in the server project.
+    Implementation of the crawl task with improved performance.
     """
+
+    if not domains:
+        logger.warning("No domains provided for crawling")
+        return {"status": "error", "message": "No domains provided for crawling"}
+    
+    if not max_depth:
+        logger.warning("No max depth provided for crawling")
+        return {"status": "error", "message": "No max depth provided for crawling"}
+
     try:
         start_time = time.time()
         all_urls = {}
-        task_id = self.request.id  # Get the task ID
+        task_id = self.request.id
 
         # Update task state to show it's starting
         self.update_state(state='PROGRESS', meta={
             'status': 'starting',
-            'task_id': task_id,  # Include task ID in status updates
+            'task_id': task_id,
             'domains': domains,
             'max_depth': max_depth
         })
 
-        # Initialize all three parsers
-        simple_parser = get_parser(ParserType.SIMPLE)
-        config_parser = get_parser(ParserType.CONFIG) 
-        ai_parser = get_parser(ParserType.AI)
+        # Initialize parsers once at the beginning
+        parsers = {
+            ParserType.SIMPLE: get_parser(ParserType.SIMPLE),
+            ParserType.CONFIG: get_parser(ParserType.CONFIG),
+            ParserType.AI: get_parser(ParserType.AI)
+        }
+        
+        # Optimized statistics tracking - just count numbers, don't store URLs
+        parser_stats = {
+            "simple": {"total": 0, "domains": set(), "unique": 0},
+            "config": {"total": 0, "domains": set(), "unique": 0},
+            "ai": {"total": 0, "domains": set(), "unique": 0},
+            "sequential": {"total": 0, "domains": set(), "unique": 0}
+        }
+        
+        # Keep track of which parser found each URL first
+        url_first_found_by = {}
 
         for i, domain in enumerate(domains):
             logger.info(f"🕵️‍♂️ Starting deep crawl for domain: {domain}")
             
-            # Update task state to show which domain is being processed
+            # Update task state for this domain
             self.update_state(state='PROGRESS', meta={
                 'status': 'crawling',
                 'domain': domain,
@@ -66,68 +234,148 @@ def crawl_task(self, domains: List[str], max_depth: int = 3) -> Dict:
             # Control crawl depth
             current_depth = 0
             
-            while urls_to_visit and current_depth < max_depth:
-                current_batch = urls_to_visit.copy()
-                urls_to_visit = []
+            # Process URLs at each depth level
+            while current_depth <= max_depth and urls_to_visit:
+                logger.info(f"Crawling depth {current_depth}: Processing {len(urls_to_visit)} URLs")
                 
-                logger.info(f"Crawling depth {current_depth}: Processing {len(current_batch)} URLs")
+                next_depth_urls = []
+                processed_count = 0
+                total_count = len(urls_to_visit)
                 
-                for url in current_batch:
+                for url in urls_to_visit:
+                    processed_count += 1
+                    
                     if url in visited_urls:
                         continue
-                        
+                    
+                    visited_urls.add(url)
+                    
                     try:
-                        logger.info(f"Fetching page: {url}")
-                        html = fetch_page(url)
-                        visited_urls.add(url)
+                        # Fetch page content
+                        html_content = fetch_page(url)
+                        if not html_content:
+                            # For potentially important URLs, retry with delay
+                            if any(keyword in url.lower() for keyword in ['product', 'category', 'collection']):
+                                logger.warning(f"Retrying important URL: {url}")
+                                time.sleep(2)  # Short delay before retry
+                                html_content = fetch_page(url)
+                            
+                            if not html_content:
+                                logger.warning(f"Failed to fetch content for {url}")
+                                continue
                         
-                        if not html:
-                            logger.warning(f"⚠️ No HTML content for {url}, skipping.")
-                            continue
+                        # Extract product URLs with parsers
+                        product_urls = set()
                         
-                        # Use all three parsers to extract product URLs
-                        urls_simple = simple_parser.parse(html, url)
-                        urls_config = config_parser.parse(html, url)
-                        urls_ai = ai_parser.parse(html, url)
-                        
-                        # Combine all results
-                        product_urls = set(urls_simple + urls_config + urls_ai)
+                        # Try each parser in the configured order
+                        for parser_type in PARSERS_TO_USE:
+                            if parser_type not in parsers:
+                                logger.warning(f"Unknown parser type: {parser_type}")
+                                continue
+                                
+                            try:
+                                parser = parsers[parser_type]
+                                urls = parser.parse(html_content, url)
+                                
+                                parser_type_str = parser_type.value if isinstance(parser_type, Enum) else str(parser_type)
+                                if urls:
+                                    # Track statistics
+                                    parser_stats[parser_type_str]["total"] += len(urls)
+                                    parser_stats[parser_type_str]["domains"].add(domain_netloc)
+                                    
+                                    # Track which URLs were found first by which parser
+                                    for found_url in urls:
+                                        if found_url not in url_first_found_by:
+                                            url_first_found_by[found_url] = parser_type_str
+                                    
+                                    product_urls.update(urls)
+                                    logger.info(f"{parser_type_str} parser found {len(urls)} URLs on {url}")
+                                    
+                                    # If you only want to use subsequent parsers if previous ones didn't find enough:
+                                    if len(product_urls) >= 5:  # Adjust threshold as needed
+                                        break
+                                        
+                            except Exception as e:
+                                logger.error(f"{parser_type} parsing failed: {str(e)}")
+                                # Continue to the next parser
                         
                         if product_urls:
+                            logger.info(f"Found {len(product_urls)} total product URLs on {url}")
                             domain_product_urls.update(product_urls)
-                            logger.info(f"Found {len(product_urls)} product URLs on {url}")
                             
-                        # Generate and add sequential product URLs based on discovered patterns
-                        sequential_urls = generate_sequential_urls(product_urls)
-                        if sequential_urls:
-                            domain_product_urls.update(sequential_urls)
-                            logger.info(f"Generated {len(sequential_urls)} additional sequential URLs")
+                            # Generate additional URLs based on patterns
+                            if len(product_urls) >= 3:
+                                seq_urls = generate_sequential_urls(product_urls)
+                                if seq_urls:
+                                    # Track statistics
+                                    parser_stats["sequential"]["total"] += len(seq_urls)
+                                    parser_stats["sequential"]["domains"].add(domain_netloc)
+                                    
+                                    # Track which URLs were found by sequential generator
+                                    for found_url in seq_urls:
+                                        if found_url not in url_first_found_by:
+                                            url_first_found_by[found_url] = "sequential"
+                                    
+                                    logger.info(f"Generated {len(seq_urls)} sequential URLs")
+                                    domain_product_urls.update(seq_urls)
                         
-                        # Look for pagination links
-                        pagination_urls = find_pagination_links(html, url, domain_netloc)
+                        # Find URLs for next depth if we're not at max depth
+                        if current_depth < max_depth:
+                            next_urls = find_urls(html_content, url, domain_netloc)
+                            
+                            # Add new URLs to the next depth queue
+                            for next_url in next_urls:
+                                if next_url not in visited_urls and next_url not in next_depth_urls:
+                                    next_depth_urls.append(next_url)
                         
-                        # Add pagination URLs to visit queue for next depth
-                        for pagination_url in pagination_urls:
-                            if pagination_url not in visited_urls:
-                                urls_to_visit.append(pagination_url)
-                        
-                        logger.info(f"Found {len(pagination_urls)} pagination links to follow")
-                        
+                        # Update progress periodically
+                        if processed_count % 10 == 0 or processed_count == total_count:
+                            self.update_state(state='PROGRESS', meta={
+                                'status': 'crawling',
+                                'domain': domain,
+                                'domain_index': i + 1,
+                                'domain_count': len(domains),
+                                'depth': current_depth,
+                                'depth_progress': f"{processed_count}/{total_count}",
+                                'urls_discovered': len(domain_product_urls)
+                            })
+                            
                     except Exception as e:
                         logger.error(f"🔥 Error crawling {url}: {e}")
                 
                 # Move to next depth
                 current_depth += 1
                 
-                # Periodically save URLs to avoid data loss
+                # Prioritize URLs by category patterns
+                category_patterns = [
+                    r'/category/', r'/collection', r'/products?/', r'/shop/', 
+                    r'/department/', r'/catalog/', r'/items?/'
+                ]
+                
+                priority_urls = []
+                other_urls = []
+                
+                for url in next_depth_urls:
+                    if any(re.search(pattern, url) for pattern in category_patterns):
+                        priority_urls.append(url)
+                    else:
+                        other_urls.append(url)
+                
+                # Combine with priority order and apply limit
+                urls_to_visit = (priority_urls + other_urls)[:500] if len(next_depth_urls) > 500 else next_depth_urls
+                
+                # Save URLs periodically
                 if domain_product_urls:
                     storage.save(domain, task_id, list(domain_product_urls))
                     logger.info(f"Saved {len(domain_product_urls)} URLs at depth {current_depth}")
             
-            # Final report
+            # Final report for this domain
             if domain_product_urls:
                 logger.info(f"✅ Total unique product URLs for {domain}: {len(domain_product_urls)}")
                 all_urls[domain] = list(domain_product_urls)
+                
+                # Final save
+                storage.save(domain, task_id, list(domain_product_urls))
             else:
                 logger.warning(f"No product URLs found for {domain}")
 
@@ -140,129 +388,58 @@ def crawl_task(self, domains: List[str], max_depth: int = 3) -> Dict:
                 'urls_discovered': sum(len(urls) for urls in all_urls.values())
             })
 
+        # Calculate unique URL counts by parser
+        for parser_name in ["simple", "config", "ai", "sequential"]:
+            unique_count = sum(1 for url, parser in url_first_found_by.items() if parser == parser_name)
+            parser_stats[parser_name]["unique"] = unique_count
+
+        # Print parser statistics
+        logger.info("="*50)
+        logger.info("PARSER STATISTICS")
+        logger.info("="*50)
+        logger.info(f"Simple parser: {parser_stats['simple']['total']} total URLs, {parser_stats['simple']['unique']} unique URLs across {len(parser_stats['simple']['domains'])} domains")
+        logger.info(f"Config parser: {parser_stats['config']['total']} total URLs, {parser_stats['config']['unique']} unique URLs across {len(parser_stats['config']['domains'])} domains")
+        logger.info(f"AI parser: {parser_stats['ai']['total']} total URLs, {parser_stats['ai']['unique']} unique URLs across {len(parser_stats['ai']['domains'])} domains")
+        logger.info(f"Sequential generator: {parser_stats['sequential']['total']} total URLs, {parser_stats['sequential']['unique']} unique URLs across {len(parser_stats['sequential']['domains'])} domains")
+        logger.info(f"Total unique product URLs: {len(url_first_found_by)}")
+        logger.info("="*50)
+
         end_time = time.time()
         duration = end_time - start_time
 
         logger.info(f"✅ Deep crawl completed in {duration:.2f} seconds")
-
+        
         return {
             "status": "completed",
-            "task_id": task_id,  # Include task ID in final result
+            "task_id": task_id,
             "duration": f"{duration:.2f} seconds",
             "domains": domains,
             "urls_count": {domain: len(urls) for domain, urls in all_urls.items()},
-            "total_urls": sum(len(urls) for urls in all_urls.values())
+            "total_urls": sum(len(urls) for urls in all_urls.values()),
+            "parser_stats": {
+                "simple": {
+                    "total": parser_stats['simple']['total'],
+                    "unique": parser_stats['simple']['unique'],
+                    "domains": len(parser_stats['simple']['domains'])
+                },
+                "config": {
+                    "total": parser_stats['config']['total'],
+                    "unique": parser_stats['config']['unique'],
+                    "domains": len(parser_stats['config']['domains'])
+                },
+                "ai": {
+                    "total": parser_stats['ai']['total'],
+                    "unique": parser_stats['ai']['unique'],
+                    "domains": len(parser_stats['ai']['domains'])
+                },
+                "sequential": {
+                    "total": parser_stats['sequential']['total'],
+                    "unique": parser_stats['sequential']['unique'],
+                    "domains": len(parser_stats['sequential']['domains'])
+                },
+                "total_unique": len(url_first_found_by)
+            }
         }
     except Exception as e:
         logger.error(f"Task {self.request.id} failed: {str(e)}")
         raise
-
-def find_pagination_links(html: str, base_url: str, domain_netloc: str) -> List[str]:
-    """
-    Extract pagination links from HTML content.
-    
-    Args:
-        html (str): HTML content to parse
-        base_url (str): Base URL of the page
-        domain_netloc (str): Domain netloc to filter internal links
-        
-    Returns:
-        List[str]: List of pagination URLs
-    """
-    from bs4 import BeautifulSoup
-    import re
-    from urllib.parse import urljoin, urlparse
-    
-    soup = BeautifulSoup(html, "html.parser")
-    pagination_links = set()
-    
-    # Common pagination patterns
-    pagination_patterns = [
-        r'[?&]page=\d+',
-        r'[?&]p=\d+',
-        r'/page/\d+',
-        r'[?&]offset=\d+',
-        r'[?&]start=\d+'
-    ]
-    
-    # Find pagination elements by common class names
-    pagination_classes = [
-        'pagination', 'pager', 'pages', 'page-numbers', 
-        'paginate', 'paging', 'page-link', 'page-item'
-    ]
-    
-    # Look for elements with pagination classes
-    for class_name in pagination_classes:
-        for element in soup.find_all(class_=lambda x: x and class_name in x.lower()):
-            for a_tag in element.find_all('a', href=True):
-                href = a_tag['href']
-                full_url = urljoin(base_url, href)
-                
-                # Only include internal links
-                if urlparse(full_url).netloc == domain_netloc:
-                    for pattern in pagination_patterns:
-                        if re.search(pattern, href):
-                            pagination_links.add(full_url)
-                            break
-    
-    # Also find direct links with pagination patterns
-    for a_tag in soup.find_all('a', href=True):
-        href = a_tag['href']
-        
-        # Check if the link text suggests pagination (numbers, next, prev)
-        text = a_tag.get_text().strip().lower()
-        if text.isdigit() or text in ['next', 'prev', 'previous', '>>', '<<']:
-            full_url = urljoin(base_url, href)
-            
-            # Only include internal links
-            if urlparse(full_url).netloc == domain_netloc:
-                pagination_links.add(full_url)
-                continue
-        
-        # Check against patterns
-        for pattern in pagination_patterns:
-            if re.search(pattern, href):
-                full_url = urljoin(base_url, href)
-                
-                # Only include internal links
-                if urlparse(full_url).netloc == domain_netloc:
-                    pagination_links.add(full_url)
-                    break
-    
-    return list(pagination_links)
-
-def generate_sequential_urls(product_urls: Set[str]) -> Set[str]:
-    """
-    Generate adjacent product URLs based on numeric patterns.
-    
-    Args:
-        product_urls (Set[str]): Set of discovered product URLs
-    
-    Returns:
-        Set[str]: Additional generated product URLs
-    """
-    import re
-    
-    additional_urls = set()
-    
-    # Find URLs with numeric IDs
-    for url in product_urls:
-        # Look for patterns like /product-detail/12345
-        match = re.search(r'(/[^/]+/(\d+))(?:/|$)', url)
-        if match:
-            path_prefix = url[:url.find(match.group(1))]
-            id_part = match.group(2)
-            try:
-                product_id = int(id_part)
-                # Generate URLs with IDs ±10 of the found ID
-                range_start = max(1, product_id - 10)
-                range_end = product_id + 10
-                
-                for new_id in range(range_start, range_end + 1):
-                    if str(new_id) != id_part:  # Skip the original ID
-                        new_url = f"{path_prefix}{match.group(1).replace(id_part, str(new_id))}"
-                        additional_urls.add(new_url)
-            except ValueError:
-                continue
-    
-    return additional_urls

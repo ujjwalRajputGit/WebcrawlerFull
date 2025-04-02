@@ -36,29 +36,6 @@ class ConfigParser:
 
         patterns = self.domain_patterns.get(domain_pattern_key, None)
 
-        logger.debug(f"Domain: {domain_pattern_key}, Patterns: {patterns}")
-
-        return parse(html, domain, patterns)
-
-
-
-
-
-        # if domainNetlock not in self.domain_patterns:
-        #     logger.warning(f"No patterns found for domain: {domain} using default patterns.")
-        #     patterns = self.domain_patterns["default"]
-        # else:
-        #     patterns = self.domain_patterns[domain]
-
-        urls = []
-
-        # Extract all href links
-        links = re.findall(r'href="(.*?)"', html)
-
-        for link in links:
-            for pattern in patterns:
-                if re.search(pattern, link):
-                    urls.append(link)
-
-        logger.info(f"Extracted {len(urls)} URLs for {domain}.")
-        return list(set(urls))  # Remove duplicates
+        urls = parse(html, domain, patterns)
+        logger.info(f"Config parser extracted {len(urls)} URLs for {domain}")
+        return urls

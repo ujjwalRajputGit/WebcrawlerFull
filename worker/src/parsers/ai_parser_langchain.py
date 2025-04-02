@@ -25,18 +25,17 @@ class BaseAIParser(ABC):
             return_messages=True
         )
         
-        # Create a more detailed prompt template
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a specialized web scraper assistant focused on e-commerce sites. 
             Your task is to analyze HTML content and extract product URLs.
 
             Important considerations:
             1. Look for product URL patterns like: 
-               - /product/{id}
-               - /product-detail/{id}
-               - /p/{id}
-               - /item/{id}
-               - /products/{slug}
+               - /product/{{id}}
+               - /product-detail/{{id}}
+               - /p/{{id}}
+               - /item/{{id}}
+               - /products/{{slug}}
                - Any URL that clearly leads to a product page
                
             2. Look for pagination links:
@@ -67,38 +66,67 @@ class BaseAIParser(ABC):
     def parse(self, html: str, base_url: str) -> List[str]:
         """Parse HTML content to extract product URLs using AI."""
         try:
-            # Format the prompt with the output parser instructions
-            formatted_prompt = self.prompt.format_messages(
-                html=html,
-                base_url=base_url,
-                format_instructions=self.output_parser.get_format_instructions()
+            llm = self.get_llm()
+            
+            messages = list(self.memory.chat_memory.messages)
+            chain_with_history = (
+                self.prompt.partial(
+                    chat_history=messages, 
+                    format_instructions=self.output_parser.get_format_instructions()
+                ) 
+                | llm 
+                | self.output_parser
             )
             
-            # Get LLM response with memory
-            llm = self.get_llm()
-            chain = self.prompt | llm | self.output_parser
-            
-            # Execute the chain with memory
-            result = chain.invoke({
-                "html": html,
-                "base_url": base_url,
-                "format_instructions": self.output_parser.get_format_instructions(),
-                "chat_history": self.memory.chat_memory.messages
+            result = chain_with_history.invoke({
+                "html": html[:10000],
+                "base_url": base_url
             })
             
-            # Update memory with the interaction
             self.memory.save_context(
                 {"input": f"Extract URLs from {base_url}"},
-                {"output": f"Found {len(result.urls)} URLs: {result.reasoning}"}
+                {"output": f"Found {len(result.urls)} URLs: {result.reasoning[:100]}..."}  # Limit reasoning size in memory
             )
             
-            logger.info(f"AI parser extracted {len(result.urls)} URLs for {base_url}")
-            logger.debug(f"Reasoning: {result.reasoning}")
-            return result.urls
+            logger.debug(f"AI parser extracted {len(result.urls)} URLs for {base_url}")
+            logger.debug(f"Extraction reasoning: {result.reasoning[:200]}...")
             
-        except Exception as e:
-            logger.error(f"AI parsing failed: {e}")
+            # Process URLs to ensure they're absolute
+            processed_urls = self._process_urls(result.urls, base_url)
+            
+            return processed_urls
+            
+        except KeyError as e:
+            logger.error(f"Missing key in AI response: {e}", exc_info=True)
             return []
+        except ValueError as e:
+            logger.error(f"Value error in AI parsing: {e}", exc_info=True)
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in AI parsing: {e}", exc_info=True)
+            return []
+    
+    def _process_urls(self, urls: List[str], base_url: str) -> List[str]:
+        """Process extracted URLs to ensure they are absolute and unique."""
+        processed = []
+        seen = set()
+        
+        for url in urls:
+            # Handle relative URLs
+            if url.startswith('/'):
+                base = base_url[:-1] if base_url.endswith('/') else base_url
+                absolute_url = f"{base}{url}"
+            elif not (url.startswith('http://') or url.startswith('https://')):
+                absolute_url = f"{base_url.rstrip('/')}/{url.lstrip('/')}"
+            else:
+                absolute_url = url
+                
+            # Deduplicate URLs
+            if absolute_url not in seen:
+                seen.add(absolute_url)
+                processed.append(absolute_url)
+                
+        return processed
 
 class GoogleGeminiParser(BaseAIParser):
     def get_llm(self):

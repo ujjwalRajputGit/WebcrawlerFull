@@ -1,15 +1,9 @@
-from enum import Enum
 from .simple_parser import SimpleParser
 # from .ai_parser_old import AIParser
 from .ai_parser_langchain import AIParser
 from .config_parser import ConfigParser
-
+from constants import ParserType
 __all__ = ["ai_parser_langchain", "config_parser", "simple_parser"]
-
-class ParserType(Enum):
-    SIMPLE = "simple"
-    AI = "ai"
-    CONFIG = "config"
 
     # Optimized parser selection using dictionary mapping
 PARSERS = {

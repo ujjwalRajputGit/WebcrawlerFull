@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from dataclasses import dataclass
 from typing import Optional
+from constants import ParserType
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,46 +42,77 @@ USER_AGENT = (
 # Simple Parser Configuration
 # ====================================
 PATTERNS = [
-    r"/product/\d+",  # Generic product page
-    r"/item/\d+",     # Item page
-    r"/p/\d+",        # Product shortcut
-    r"/products/[a-zA-Z0-9-]+",  # Slug-based products
-    r"/shop/[a-zA-Z0-9-]+",      # Shop section
-    r"/store/[^/]+/product/[a-zA-Z0-9-]+",  # Store-specific products
-    r"/category/[^/]+/[^/]+",    # Category-based products
-    r"/detail/[a-zA-Z0-9-]+",    # Detail pages
-    r"/product(?:-[a-zA-Z0-9]+)+",  # Hyphen-separated product IDs
-    r"/products/[0-9]+"           # Numeric product pages
+    # Product patterns
+    r'/product[s]?/[a-zA-Z0-9-_]+',  # Generic product pages
+    r'/item[s]?/[a-zA-Z0-9-_]+',     # Item pages
+    r'/p/[a-zA-Z0-9-_]+',            # Short product URLs
+    r'/products?(?:[-/][a-zA-Z0-9-_]+)+',  # Product with categories
+    r'/shop/[a-zA-Z0-9-_]+',         # Shop items
+    r'/store/[^/]+/product[s]?/[a-zA-Z0-9-_]+',  # Store products
+    r'/category/[^/]+/[a-zA-Z0-9-_]+',  # Category products
+    r'/detail[s]?/[a-zA-Z0-9-_]+',   # Detail pages
+    r'/pd[x]?/[a-zA-Z0-9-_]+',       # Product detail
+    r'/buy/[a-zA-Z0-9-_]+',          # Buy pages
+    r'/goods/[a-zA-Z0-9-_]+',        # Goods pages
+    r'/item-[0-9]+\.html',           # Item HTML pages
+    r'/[a-zA-Z0-9-_]+-p-\d+',        # Product with ID
+    
+    # Collection/Category patterns
+    r'/collection[s]?/[a-zA-Z0-9-_]+',
+    r'/category/[a-zA-Z0-9-_]+',
+    r'/department/[a-zA-Z0-9-_]+',
+    
+    # Common e-commerce patterns
+    r'/dp/[A-Z0-9]+',                # Amazon-style product
+    r'/gp/product/[A-Z0-9]+',        # Alternative product format
+    r'/[A-Z0-9]{10,}',              # Product IDs (like Amazon ASIN)
+    
+    # Query parameter patterns
+    r'product_id=\d+',
+    r'item_id=\d+',
+    r'pid=\d+'
 ]
 
 # ====================================
 # Domain-specific URL Patterns
 # ====================================
 DOMAIN_PATTERNS = {
-    "default": [
-        r"/product/\d+",  # Generic product page
-        r"/item/\d+",     # Item page
-        r"/p/\d+",        # Product shortcut
-        r"/products/[a-zA-Z0-9-]+",  # Slug-based products
-        r"/shop/[a-zA-Z0-9-]+",      # Shop section
-        r"/store/[^/]+/product/[a-zA-Z0-9-]+",  # Store-specific products
-        r"/category/[^/]+/[^/]+",    # Category-based products
-        r"/detail/[a-zA-Z0-9-]+",    # Detail pages
-        r"/product(?:-[a-zA-Z0-9]+)+",  # Hyphen-separated product IDs
-        r"/products/[0-9]+"           # Numeric product pages
-        r"/product-detail/\d+",   # The pattern from your example
-        r"/pd/\d+",               # Common product detail
-        r"/item-detail/\d+",      # Item detail
-        r"/catalog/product/view/id/\d+", # Magento style
-        r"/product/view/id/\d+",  # Alternative product view
-        r"/productdetails/\d+"    # No hyphen variant
+    "default": PATTERNS,
+    "amazon": [
+        r'/dp/[A-Z0-9]{10}',
+        r'/gp/product/[A-Z0-9]{10}',
     ],
-    "virgio.com": [r"/product/\d+",r"/products/\d+", r"/item/\w+", r"/p/\d+"],
-    "tatacliq.com": [r"/product/.*",r"/products/\d+", r"/pdp/.*"],
-    "nykaafashion.com": [r"/products/.*", r"/p/.*"],
-    "westside.com": [r"/shop/.*", r"/products/.*"]
+    "shopify": [
+        r'/products/[a-zA-Z0-9-]+',
+        r'/collections/[^/]+/products/[a-zA-Z0-9-]+'
+    ],
+    "woocommerce": [
+        r'/product/[a-zA-Z0-9-]+',
+        r'/shop/[a-zA-Z0-9-]+'
+    ],
+    "magento": [
+        r'/catalog/product/view/id/\d+',
+        r'/[a-zA-Z0-9-]+\.html'
+    ],
+    "bigcommerce": [
+        r'/products/[a-zA-Z0-9-]+',
+        r'/[a-zA-Z0-9-]+-p\d+'
+    ]
+    # Add more domain-specific patterns
 }
 
+# Pagination patterns
+PAGINATION_PATTERNS = [
+    r'[?&]page=\d+',
+    r'[?&]p=\d+',
+    r'/page/\d+',
+    r'/p/\d+$',
+    r'-page-\d+',
+    r'_p\d+',
+    r'offset=\d+',
+    r'start=\d+',
+    r'from=\d+'
+]
 
 # ====================================
 # AI Parser Configuration
@@ -144,7 +176,6 @@ DEFAULT_AI_CONFIG = AIConfig(
 # ====================================
 # Advanced Crawler Configuration
 # ====================================
-MAX_CRAWL_DEPTH = 3  # Maximum depth for pagination
 CRAWL_DELAY = 0.5  # Delay between requests in seconds
 
 # ====================================
@@ -159,4 +190,19 @@ else:
 
 CELERY_RESULT_EXPIRES = 3600 
 
+# ====================================
+# Logging Configuration
+# ====================================
+LOG_DIR = os.path.join(os.path.dirname(__file__), "../../Logs")
+LOG_FILE = os.path.join(LOG_DIR, "worker.log")
+LOG_TO_FILE = True
+LOG_LEVEL_CONSOLE = "INFO"
+LOG_LEVEL_FILE = "DEBUG"
+
+# Create logs directory if it doesn't exist
+if LOG_TO_FILE:
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+# Define which parsers to use and in what order
+PARSERS_TO_USE = [ParserType.SIMPLE, ParserType.CONFIG]
 

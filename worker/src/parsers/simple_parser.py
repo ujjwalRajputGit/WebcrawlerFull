@@ -1,6 +1,4 @@
-from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin
 from ._pattern_parser import parse
 from utils.config import PATTERNS
 from utils.logger import get_logger
@@ -27,19 +25,6 @@ class SimpleParser:
         """
 
         return PATTERNS
-    
-        return [
-            r"/product/\d+",
-            r"/item/\d+",
-            r"/p/\d+",
-            r"/products/[a-zA-Z0-9-]+",          # Slug-based products
-            r"/shop/[a-zA-Z0-9-]+",              # Shop section
-            r"/store/[^/]+/product/[a-zA-Z0-9-]+",  # Store-specific products
-            r"/category/[^/]+/[^/]+",            # Category-based products
-            r"/detail/[a-zA-Z0-9-]+",            # Detail pages
-            r"/product(?:-[a-zA-Z0-9]+)+",       # Hyphen-separated product IDs
-            r"/products/[0-9]+",                 # Numeric product pages
-        ]
 
     def parse(self, html: str, base_url: str) -> List[str]:
         """
@@ -53,34 +38,6 @@ class SimpleParser:
             List[str]: List of unique product URLs
         """
 
-        return parse(html, base_url, self.patterns)
-    
-
-
-
-
-    
-        soup = BeautifulSoup(html, "html.parser")
-        product_links = set()
-
-        a_tags = soup.find_all("a", href=True)
-        logger.debug(f"Found {len(a_tags)} anchor tags with href attributes.")
-        
-        for a_tag in a_tags:
-            href = a_tag["href"]
-            full_url = urljoin(base_url, href)
-
-            logger.debug(f"Found href: {href}, Resolved URL: {full_url}")
-            
-            for pattern in self.compiled_patterns:
-                if pattern.search(href):
-                    product_links.add(full_url)
-                    logger.debug(f"Matched product URL: {full_url}")
-                    break
-
-        # Normalize URLs (remove trailing slashes, duplicates)
-        product_links = {url.rstrip('/') for url in product_links}
-        
-        logger.info(f"Extracted {len(product_links)} unique product URLs.")
-        return sorted(product_links)
-
+        urls = parse(html, base_url, self.patterns)
+        logger.info(f"Simple parser extracted {len(urls)} URLs for {base_url}")
+        return urls

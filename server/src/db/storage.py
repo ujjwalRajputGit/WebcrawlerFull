@@ -31,7 +31,6 @@ class Storage:
         parsed_url = extract(domain)
         logger.debug(f"Parsed URL: {parsed_url}")
         logger.debug(f"Simplifying domain: {domain} to {parsed_url.domain}.{parsed_url.suffix}")
-        # Use the domain as the unique ID
         return f"{parsed_url.domain}.{parsed_url.suffix}".replace(".", "_")
     
     def _get_redis_key(self, domain, taskId):
@@ -44,7 +43,6 @@ class Storage:
         Returns:
             str: The Redis key.
         """
-        # Use a single key for all domains
         return f"{self._get_root_name()}:{taskId}:{self._simplify_domain(domain)}"
 
     def _get_mongo_collection_name(self):
@@ -57,7 +55,6 @@ class Storage:
         Returns:
             str: The MongoDB collection name.
         """
-        # Use a single collection for all domains
         return self._get_root_name()
 
     ## Retrieve URLs from Redis

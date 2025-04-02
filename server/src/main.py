@@ -7,9 +7,10 @@ from db.storage import Storage
 from db.redis_client import redis_client
 from utils.config import (
     REDIS_HOST, REDIS_PORT, 
-    CORS_ORIGINS  # Import server-specific configs
+    CORS_ORIGINS, DEFAULT_MAX_CRAWL_DEPTH
 )
 from urllib.parse import unquote
+from pydantic import BaseModel
 
 app = FastAPI(
     title="Web Crawler API",
@@ -28,6 +29,10 @@ app.add_middleware(
 
 logger = get_logger(__name__)
 
+class CrawlRequest(BaseModel):
+    domains: list[str]
+    max_depth: int = DEFAULT_MAX_CRAWL_DEPTH
+
 @app.get("/")
 def read_root():
     """Root endpoint."""
@@ -37,28 +42,27 @@ def read_root():
     }
 
 @app.post("/crawl/")
-def trigger_crawl(domains: list[str], max_depth: int = 3):
+def trigger_crawl(request: CrawlRequest):
     """
     Trigger the crawler for given domains.
 
     Args:
-        domains (list): List of e-commerce domains to crawl.
-        max_depth (int): Maximum crawl depth for pagination.
+        request (CrawlRequest): The request containing domains to crawl and max depth
     
     Returns:
         dict: Celery task ID and status.
     """
     try:
         # Trigger crawl task asynchronously
-        task = crawl_task.apply_async(args=[domains, max_depth])
+        task = crawl_task.apply_async(args=[request.domains, request.max_depth])
         
-        logger.info(f"Started crawling task {task.id} for domains: {domains}")
+        logger.info(f"Started crawling task {task.id} for domains: {request.domains}")
         
         return {
             "task_id": task.id,
             "status": "Crawling started",
-            "domains": domains,
-            "max_depth": max_depth
+            "domains": request.domains,
+            "max_depth": request.max_depth
         }
     except Exception as e:
         logger.error(f"Error starting task: {e}")
@@ -82,7 +86,6 @@ def get_task_status(task_id: str):
         "status": task.status,
     }
     
-    # Add more information based on task status
     if task.status == 'PENDING':
         response['info'] = 'Task is waiting for execution'
     elif task.status == 'STARTED':
@@ -156,7 +159,6 @@ def get_urls(task_id: str, domain: str):
         # Decode the URL-encoded domain
         domain = unquote(domain)
         
-        # Initialize Storage class
         storage = Storage()
         
         # Try getting from Redis first
