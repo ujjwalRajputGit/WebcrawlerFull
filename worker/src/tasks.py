@@ -3,7 +3,7 @@ import time
 import random
 from enum import Enum
 from celery_worker import celery_app
-from utils.fetcher import fetch_page
+from utils.fetcher import fetch_page, fetch_page_async
 from parsers import get_parser
 from constants import ParserType
 from db.storage import Storage
@@ -12,6 +12,8 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunsplit
 from typing import Set, Dict, List
 from bs4 import BeautifulSoup
 from utils.config import PAGINATION_PATTERNS, PARSERS_TO_USE
+import asyncio
+import aiohttp
 
 logger = get_logger(__name__)
 
@@ -166,9 +168,8 @@ def generate_sequential_urls(product_urls, max_urls=30):
                  rate_limit='10/m')
 def crawl_task(self, domains: List[str], max_depth:int) -> Dict:
     """
-    Implementation of the crawl task using Celery's chord pattern to process domains in parallel.
+    Implementation of the crawl task with detailed status updates.
     """
-
     if not domains:
         logger.warning("No domains provided for crawling")
         return {"status": "error", "message": "No domains provided for crawling"}
@@ -189,33 +190,99 @@ def crawl_task(self, domains: List[str], max_depth:int) -> Dict:
             'max_depth': max_depth
         })
         
-        # Use Celery's chord pattern to process domains in parallel and then aggregate results
-        from celery import chord
+        # Process domains sequentially within this task
+        all_results = []
+        domain_statuses = {domain: {'status': 'pending', 'depth': 0, 'depth_progress': '0/0', 'urls_discovered': 0} for domain in domains}
         
-        # Create subtasks for each domain - these will run in parallel
-        subtasks = [crawl_single_domain.s(domain, max_depth, task_id) for domain in domains]
+        for i, domain in enumerate(domains):
+            # Update status to show we're starting this domain
+            domain_statuses[domain]['status'] = 'crawling'
+            self.update_state(state='PROGRESS', meta={
+                'status': 'processing',
+                'task_id': task_id,
+                'progress': f"{i}/{len(domains)}",
+                'domains_completed': i,
+                'domains_total': len(domains),
+                'current_domain': domain,
+                'domain_statuses': domain_statuses
+            })
+            
+            # Process the domain with a status update callback
+            result = process_domain(domain, max_depth, task_id, 
+                                    lambda status_update: update_domain_status(self, domain, status_update, domain_statuses, i, len(domains)))
+            
+            all_results.append(result)
+            
+            # Mark domain as completed in status
+            domain_statuses[domain]['status'] = 'completed'
+            domain_statuses[domain]['urls_discovered'] = result.get('urls_count', 0)
+            
+            # Update progress after each domain
+            self.update_state(state='PROGRESS', meta={
+                'status': 'processing',
+                'task_id': task_id,
+                'progress': f"{i+1}/{len(domains)}",
+                'domains_completed': i+1,
+                'domains_total': len(domains),
+                'domain_statuses': domain_statuses
+            })
         
-        # Create a chord that runs the aggregation task after all domains are processed
-        callback = aggregate_results.s(task_id=task_id, domains=domains, start_time=time.time())
-        chord(subtasks)(callback)
-        
-        return {
-            "status": "initiated",
-            "task_id": task_id,
-            "message": f"Started parallel crawling of {len(domains)} domains",
-            "domains": domains
-        }
+        # Aggregate results directly
+        return aggregate_results_locally(all_results, task_id, domains, start_time)
     except Exception as e:
         logger.error(f"Task {self.request.id} failed: {str(e)}")
         raise
 
-@celery_app.task(name="tasks.aggregate_results")
-def aggregate_results(domain_results, task_id, domains, start_time):
+def update_domain_status(task, domain, status_update, domain_statuses, domains_completed, total_domains):
     """
-    Aggregates results from individual domain crawls without storing full URL lists.
+    Update the domain status and propagate to the main task status.
+    """
+    # Update this domain's status in our tracking dict
+    domain_statuses[domain].update(status_update)
+    
+    # Update the main task status
+    task.update_state(state='PROGRESS', meta={
+        'status': 'processing',
+        'progress': f"{domains_completed}/{total_domains}",
+        'domains_completed': domains_completed,
+        'domains_total': total_domains,
+        'current_domain': domain,
+        'domain_statuses': domain_statuses
+    })
+
+def process_domain(domain: str, max_depth: int, parent_task_id: str, status_callback=None) -> Dict:
+    """
+    Process a single domain within the main task using async for improved performance.
+    """
+    logger.info(f"🕵️‍♂️ Starting deep crawl for domain: {domain}")
+    
+    # Run the async function using asyncio
+    try:
+        # Create a status reporting task that uses the callback
+        class StatusReportingTask:
+            def update_state(self, state, meta):
+                logger.info(f"Domain {domain} progress: {meta}")
+                if status_callback:
+                    status_callback(meta)
+        
+        task = StatusReportingTask()
+        
+        # Run the async function
+        return asyncio.run(crawl_single_domain_async(task, domain, max_depth, parent_task_id))
+    except Exception as e:
+        logger.error(f"Error crawling domain {domain}: {str(e)}")
+        return {
+            "status": "error",
+            "domain": domain,
+            "error": str(e)
+        }
+
+def aggregate_results_locally(domain_results, task_id, domains, start_time):
+    """
+    Local version of aggregate_results that doesn't need to be a Celery task.
     """
     try:
-        # Aggregate results
+        # Same aggregation logic as the Celery task
         parser_stats = {
             "simple": {"total": 0, "domains": set(), "unique": 0},
             "config": {"total": 0, "domains": set(), "unique": 0},
@@ -248,10 +315,6 @@ def aggregate_results(domain_results, task_id, domains, start_time):
         # Convert sets to lists for JSON serialization
         for parser_type in parser_stats:
             parser_stats[parser_type]["domains"] = list(parser_stats[parser_type]["domains"])
-        
-        # Get URLs from storage for final count (if needed)
-        # This could optionally be done if you need absolute accuracy
-        # But the counts we have should be sufficient
         
         return {
             "status": "completed",
@@ -294,10 +357,17 @@ def aggregate_results(domain_results, task_id, domains, start_time):
                 rate_limit='10/m')
 def crawl_single_domain(self, domain: str, max_depth: int, parent_task_id: str) -> Dict:
     """
-    Process a single domain for crawling.
+    Process a single domain for crawling using async for improved performance.
     """
     logger.info(f"🕵️‍♂️ Starting deep crawl for domain: {domain}")
     
+    # Run the async function using asyncio
+    return asyncio.run(crawl_single_domain_async(self, domain, max_depth, parent_task_id))
+
+async def crawl_single_domain_async(task, domain: str, max_depth: int, parent_task_id: str) -> Dict:
+    """
+    Asynchronous implementation of domain crawling with detailed status updates.
+    """
     try:
         # Initialize parsers for this subtask
         parsers = {
@@ -330,138 +400,138 @@ def crawl_single_domain(self, domain: str, max_depth: int, parent_task_id: str) 
         # Control crawl depth
         current_depth = 0
         
-        # Process URLs at each depth level
-        while current_depth < max_depth and urls_to_visit:
-            logger.info(f"Crawling depth {current_depth}: Processing {len(urls_to_visit)} URLs")
-            
-            next_depth_urls = []
-            processed_count = 0
-            total_count = len(urls_to_visit)
-            
-            for url in urls_to_visit:
-                processed_count += 1
+        # Create an aiohttp session for reuse
+        async with aiohttp.ClientSession() as session:
+            # Process URLs at each depth level
+            while current_depth < max_depth and urls_to_visit:
+                logger.info(f"Crawling depth {current_depth}: Processing {len(urls_to_visit)} URLs")
                 
-                if url in visited_urls:
-                    continue
+                # Update status at the start of each depth
+                task.update_state(state='PROGRESS', meta={
+                    'status': 'crawling',
+                    'domain': domain,
+                    'depth': current_depth,
+                    'depth_progress': f"0/{len(urls_to_visit)}",
+                    'urls_discovered': len(domain_product_urls),
+                    'total_urls_to_process': len(urls_to_visit)
+                })
                 
-                visited_urls.add(url)
+                next_depth_urls = []
+                processed_count = 0
+                total_count = len(urls_to_visit)
                 
-                try:
-                    # Fetch page content
-                    html_content = fetch_page(url)
-                    if not html_content:
-                        # For potentially important URLs, retry with delay
-                        if any(keyword in url.lower() for keyword in ['product', 'category', 'collection']):
-                            logger.warning(f"Retrying important URL: {url}")
-                            time.sleep(2)  # Short delay before retry
-                            html_content = fetch_page(url)
+                # Process URLs in batches to avoid overwhelming servers
+                batch_size = 10  # Adjust based on target site capabilities
+                for i in range(0, len(urls_to_visit), batch_size):
+                    batch = urls_to_visit[i:i+batch_size]
+                    batch = [url for url in batch if url not in visited_urls]
+                    
+                    # Mark as visited before processing
+                    for url in batch:
+                        visited_urls.add(url)
+                    
+                    # Create tasks for concurrent fetching
+                    tasks = []
+                    for url in batch:
+                        tasks.append(process_url(
+                            url, 
+                            session, 
+                            parsers, 
+                            PARSERS_TO_USE, 
+                            domain_netloc, 
+                            url_first_found_by, 
+                            parser_stats, 
+                            current_depth, 
+                            max_depth
+                        ))
+                    
+                    # Process batch concurrently
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Process results
+                    for url, result in zip(batch, results):
+                        processed_count += 1
                         
-                        if not html_content:
-                            logger.warning(f"Failed to fetch content for {url}")
-                            continue
-                    
-                    # Extract product URLs with parsers
-                    product_urls = set()
-                    
-                    # Try each parser in the configured order
-                    for parser_type in PARSERS_TO_USE:
-                        if parser_type not in parsers:
-                            logger.warning(f"Unknown parser type: {parser_type}")
+                        if isinstance(result, Exception):
+                            logger.error(f"🔥 Error crawling {url}: {result}")
                             continue
                             
-                        try:
-                            parser = parsers[parser_type]
-                            urls = parser.parse(html_content, url)
+                        product_urls, next_urls = result
+                        
+                        if product_urls:
+                            logger.info(f"Found {len(product_urls)} total product URLs on {url}")
+                            domain_product_urls.update(product_urls)
                             
-                            parser_type_str = parser_type.value if isinstance(parser_type, Enum) else str(parser_type)
-                            if urls:
-                                # Track statistics
-                                parser_stats[parser_type_str]["total"] += len(urls)
-                                parser_stats[parser_type_str]["domains"].add(domain_netloc)
-                                
-                                # Track which URLs were found first by which parser
-                                for found_url in urls:
-                                    if found_url not in url_first_found_by:
-                                        url_first_found_by[found_url] = parser_type_str
-                                
-                                product_urls.update(urls)
-                                logger.info(f"{parser_type_str} parser found {len(urls)} URLs on {url}")
-                                
-                                # If you only want to use subsequent parsers if previous ones didn't find enough:
-                                if len(product_urls) >= 5:  # Adjust threshold as needed
-                                    break
+                            # Generate additional URLs based on patterns
+                            if len(product_urls) >= 3:
+                                seq_urls = generate_sequential_urls(product_urls)
+                                if seq_urls:
+                                    # Track statistics
+                                    parser_stats["sequential"]["total"] += len(seq_urls)
+                                    parser_stats["sequential"]["domains"].add(domain_netloc)
                                     
-                        except Exception as e:
-                            logger.error(f"{parser_type} parsing failed: {str(e)}")
-                            # Continue to the next parser
-                    
-                    if product_urls:
-                        logger.info(f"Found {len(product_urls)} total product URLs on {url}")
-                        domain_product_urls.update(product_urls)
-                        
-                        # Generate additional URLs based on patterns
-                        if len(product_urls) >= 3:
-                            seq_urls = generate_sequential_urls(product_urls)
-                            if seq_urls:
-                                # Track statistics
-                                parser_stats["sequential"]["total"] += len(seq_urls)
-                                parser_stats["sequential"]["domains"].add(domain_netloc)
-                                
-                                # Track which URLs were found by sequential generator
-                                for found_url in seq_urls:
-                                    if found_url not in url_first_found_by:
-                                        url_first_found_by[found_url] = "sequential"
-                                
-                                logger.info(f"Generated {len(seq_urls)} sequential URLs")
-                                domain_product_urls.update(seq_urls)
-                    
-                    # Find URLs for next depth if we're not at max depth
-                    if current_depth < max_depth:
-                        next_urls = find_urls(html_content, url, domain_netloc)
+                                    # Track which URLs were found by sequential generator
+                                    for found_url in seq_urls:
+                                        if found_url not in url_first_found_by:
+                                            url_first_found_by[found_url] = "sequential"
+                                    
+                                    logger.info(f"Generated {len(seq_urls)} sequential URLs")
+                                    domain_product_urls.update(seq_urls)
                         
                         # Add new URLs to the next depth queue
                         for next_url in next_urls:
                             if next_url not in visited_urls and next_url not in next_depth_urls:
                                 next_depth_urls.append(next_url)
                     
-                    # Update progress periodically
-                    if processed_count % 10 == 0 or processed_count == total_count:
-                        self.update_state(state='PROGRESS', meta={
-                            'status': 'crawling',
-                            'domain': domain,
-                            'depth': current_depth,
-                            'depth_progress': f"{processed_count}/{total_count}",
-                            'urls_discovered': len(domain_product_urls)
-                        })
-                        
-                except Exception as e:
-                    logger.error(f"🔥 Error crawling {url}: {e}")
-            
-            # Move to next depth
-            current_depth += 1
-            
-            # Prioritize URLs by category patterns
-            category_patterns = [
-                r'/category/', r'/collection', r'/products?/', r'/shop/', 
-                r'/department/', r'/catalog/', r'/items?/'
-            ]
-            
-            priority_urls = []
-            other_urls = []
-            
-            for url in next_depth_urls:
-                if any(re.search(pattern, url) for pattern in category_patterns):
-                    priority_urls.append(url)
-                else:
-                    other_urls.append(url)
-            
-            # Combine with priority order and apply limit
-            urls_to_visit = (priority_urls + other_urls)[:500] if len(next_depth_urls) > 500 else next_depth_urls
-            
-            # Save URLs periodically
-            if domain_product_urls:
-                storage.save(domain, parent_task_id, list(domain_product_urls))
-                logger.info(f"Saved {len(domain_product_urls)} URLs at depth {current_depth}")
+                    # Update progress more frequently (after each batch)
+                    task.update_state(state='PROGRESS', meta={
+                        'status': 'crawling',
+                        'domain': domain,
+                        'depth': current_depth,
+                        'depth_progress': f"{processed_count}/{total_count}",
+                        'urls_discovered': len(domain_product_urls),
+                        'batch_progress': f"{i+batch_size if i+batch_size < total_count else total_count}/{total_count}",
+                        'urls_in_next_depth': len(next_depth_urls)
+                    })
+                    
+                    # Add a small delay between batches to be nice to the server
+                    await asyncio.sleep(1)
+                
+                # Move to next depth
+                current_depth += 1
+                
+                # Prioritize URLs by category patterns
+                category_patterns = [
+                    r'/category/', r'/collection', r'/products?/', r'/shop/', 
+                    r'/department/', r'/catalog/', r'/items?/'
+                ]
+                
+                priority_urls = []
+                other_urls = []
+                
+                for url in next_depth_urls:
+                    if any(re.search(pattern, url) for pattern in category_patterns):
+                        priority_urls.append(url)
+                    else:
+                        other_urls.append(url)
+                
+                # Combine with priority order and apply limit
+                urls_to_visit = (priority_urls + other_urls)[:500] if len(next_depth_urls) > 500 else next_depth_urls
+                
+                # Save URLs periodically
+                if domain_product_urls:
+                    storage.save(domain, parent_task_id, list(domain_product_urls))
+                    logger.info(f"Saved {len(domain_product_urls)} URLs at depth {current_depth}")
+                
+                # Update status at the end of each depth
+                task.update_state(state='PROGRESS', meta={
+                    'status': 'crawling',
+                    'domain': domain,
+                    'depth': current_depth,
+                    'depth_complete': True,
+                    'urls_discovered': len(domain_product_urls),
+                    'next_depth_urls': len(urls_to_visit)
+                })
         
         # Final report for this domain
         if domain_product_urls:
@@ -502,3 +572,66 @@ def crawl_single_domain(self, domain: str, max_depth: int, parent_task_id: str) 
             "domain": domain,
             "error": str(e)
         }
+
+async def process_url(url, session, parsers, parsers_to_use, domain_netloc, url_first_found_by, parser_stats, current_depth, max_depth):
+    """
+    Process a single URL asynchronously - fetch, parse, and extract links.
+    """
+    try:
+        # Fetch page content asynchronously
+        html_content = await fetch_page_async(url, session)
+        if not html_content:
+            # For potentially important URLs, retry with delay
+            if any(keyword in url.lower() for keyword in ['product', 'category', 'collection']):
+                logger.warning(f"Retrying important URL: {url}")
+                await asyncio.sleep(2)  # Short delay before retry
+                html_content = await fetch_page_async(url, session)
+            
+            if not html_content:
+                logger.warning(f"Failed to fetch content for {url}")
+                return set(), []
+        
+        # Extract product URLs with parsers
+        product_urls = set()
+        
+        # Try each parser in the configured order
+        for parser_type in parsers_to_use:
+            if parser_type not in parsers:
+                logger.warning(f"Unknown parser type: {parser_type}")
+                continue
+                
+            try:
+                parser = parsers[parser_type]
+                urls = parser.parse(html_content, url)
+                
+                parser_type_str = parser_type.value if isinstance(parser_type, Enum) else str(parser_type)
+                if urls:
+                    # Track statistics
+                    parser_stats[parser_type_str]["total"] += len(urls)
+                    parser_stats[parser_type_str]["domains"].add(domain_netloc)
+                    
+                    # Track which URLs were found first by which parser
+                    for found_url in urls:
+                        if found_url not in url_first_found_by:
+                            url_first_found_by[found_url] = parser_type_str
+                    
+                    product_urls.update(urls)
+                    logger.info(f"{parser_type_str} parser found {len(urls)} URLs on {url}")
+                    
+                    # If you only want to use subsequent parsers if previous ones didn't find enough:
+                    if len(product_urls) >= 5:  # Adjust threshold as needed
+                        break
+                        
+            except Exception as e:
+                logger.error(f"{parser_type} parsing failed: {str(e)}")
+                # Continue to the next parser
+        
+        # Find URLs for next depth if we're not at max depth
+        next_urls = []
+        if current_depth < max_depth - 1:
+            next_urls = find_urls(html_content, url, domain_netloc)
+            
+        return product_urls, next_urls
+    except Exception as e:
+        logger.error(f"Error processing URL {url}: {e}")
+        raise

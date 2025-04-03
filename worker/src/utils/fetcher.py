@@ -11,7 +11,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-import os
+import ssl
+import aiohttp
 
 logger = get_logger(__name__)
 
@@ -222,3 +223,47 @@ def fetch_with_requests(url: str) -> str:
 
     logger.error(f"Failed to fetch {url} after {MAX_RETRIES} retries.")
     return None
+
+async def fetch_page_async(url, session):
+    """
+    Asynchronous version of fetch_page using aiohttp with better SSL error handling.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        # Create a non-verifying SSL context up front
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        try:
+            # First attempt with normal SSL verification
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    return await response.text()
+                else:
+                    logger.warning(f"Failed to fetch {url} - Status: {response.status}")
+        except (ssl.SSLCertVerificationError, 
+                aiohttp.ClientConnectorSSLError, 
+                aiohttp.ClientConnectorError,
+                ssl.SSLError) as ssl_err:
+            # If any SSL-related error occurs, retry without verification
+            logger.warning(f"SSL verification failed for {url}, retrying without verification: {str(ssl_err)}")
+            
+            try:
+                async with session.get(url, headers=headers, timeout=10, ssl=ssl_context) as response:
+                    if response.status == 200:
+                        return await response.text()
+                    else:
+                        logger.warning(f"Failed to fetch {url} even without SSL verification - Status: {response.status}")
+            except Exception as inner_e:
+                logger.error(f"Error fetching {url} without SSL verification: {str(inner_e)}")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching {url}: {str(e)}")
+        return None

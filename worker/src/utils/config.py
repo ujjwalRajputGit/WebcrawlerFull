@@ -204,5 +204,5 @@ if LOG_TO_FILE:
     os.makedirs(LOG_DIR, exist_ok=True)
 
 # Define which parsers to use and in what order
-PARSERS_TO_USE = [ParserType.SIMPLE, ParserType.CONFIG]
+PARSERS_TO_USE = [ParserType.SIMPLE, ParserType.CONFIG, ParserType.AI]
 
