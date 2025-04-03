@@ -21,6 +21,9 @@ celery_app.conf.update(
     task_track_started=True,
 )
 
+# Import tasks module directly to ensure registration
+import tasks
+
 # Auto-discover any other tasks in the application
 celery_app.autodiscover_tasks(['tasks'])
 
