@@ -1,12 +1,18 @@
 import redis
 from utils.config import REDIS_HOST, REDIS_PORT, REDIS_USERNAME, REDIS_PASSWORD
 
-# Redis connection configuration
-redis_client = redis.StrictRedis(
-    host=REDIS_HOST,
+
+redis_pool = redis.ConnectionPool(
+    host=REDIS_HOST, 
     port=REDIS_PORT,
     username=REDIS_USERNAME,
-    password=REDIS_PASSWORD,
     db=0,
-    decode_responses=False  # Use binary responses
+    password=REDIS_PASSWORD,
+    decode_responses=False,  # Keep binary data as is
+    max_connections=20 
 )
+
+redis_client = redis.Redis(connection_pool=redis_pool)
+
+def get_redis_client():
+    return redis.Redis(connection_pool=redis_pool)

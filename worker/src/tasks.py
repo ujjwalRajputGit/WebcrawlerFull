@@ -235,20 +235,29 @@ def crawl_task(self, domains: List[str], max_depth:int) -> Dict:
 
 def update_domain_status(task, domain, status_update, domain_statuses, domains_completed, total_domains):
     """
-    Update the domain status and propagate to the main task status.
+    Update the domain status with reduced Redis connections.
     """
     # Update this domain's status in our tracking dict
     domain_statuses[domain].update(status_update)
     
-    # Update the main task status
-    task.update_state(state='PROGRESS', meta={
-        'status': 'processing',
-        'progress': f"{domains_completed}/{total_domains}",
-        'domains_completed': domains_completed,
-        'domains_total': total_domains,
-        'current_domain': domain,
-        'domain_statuses': domain_statuses
-    })
+    # Only update task state for significant changes or periodically
+    if (
+        'status' in status_update or  # Status changes are important
+        'depth' in status_update or   # New depth levels are important
+        'depth_complete' in status_update or  # Completing a depth is important
+        getattr(update_domain_status, 'counter', 0) % 10 == 0  # Only update every 10 minor changes
+    ):
+        task.update_state(state='PROGRESS', meta={
+            'status': 'processing',
+            'progress': f"{domains_completed}/{total_domains}",
+            'domains_completed': domains_completed,
+            'domains_total': total_domains,
+            'current_domain': domain,
+            'domain_statuses': domain_statuses
+        })
+    
+    # Update counter for periodic updates
+    update_domain_status.counter = getattr(update_domain_status, 'counter', 0) + 1
 
 def process_domain(domain: str, max_depth: int, parent_task_id: str, status_callback=None) -> Dict:
     """
@@ -483,16 +492,17 @@ async def crawl_single_domain_async(task, domain: str, max_depth: int, parent_ta
                             if next_url not in visited_urls and next_url not in next_depth_urls:
                                 next_depth_urls.append(next_url)
                     
-                    # Update progress more frequently (after each batch)
-                    task.update_state(state='PROGRESS', meta={
-                        'status': 'crawling',
-                        'domain': domain,
-                        'depth': current_depth,
-                        'depth_progress': f"{processed_count}/{total_count}",
-                        'urls_discovered': len(domain_product_urls),
-                        'batch_progress': f"{i+batch_size if i+batch_size < total_count else total_count}/{total_count}",
-                        'urls_in_next_depth': len(next_depth_urls)
-                    })
+                    # Update progress less frequently (every 3 batches instead of every batch)
+                    if i % (batch_size * 3) == 0 or processed_count >= total_count:
+                        task.update_state(state='PROGRESS', meta={
+                            'status': 'crawling',
+                            'domain': domain,
+                            'depth': current_depth,
+                            'depth_progress': f"{processed_count}/{total_count}",
+                            'urls_discovered': len(domain_product_urls),
+                            'batch_progress': f"{i+batch_size if i+batch_size < total_count else total_count}/{total_count}",
+                            'urls_in_next_depth': len(next_depth_urls)
+                        })
                     
                     # Add a small delay between batches to be nice to the server
                     await asyncio.sleep(1)

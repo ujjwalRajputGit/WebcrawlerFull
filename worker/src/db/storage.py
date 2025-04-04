@@ -105,19 +105,20 @@ class Storage:
     ## Store URLs temporarily in Redis
     def store_temp(self, domain, taskId, urls):
         """
-        Store URLs temporarily in Redis to prevent duplicates.
-        
-        Args:
-            domain (str): The domain being crawled.
-            urls (list): List of discovered product URLs.
+        Store URLs temporarily in Redis using pipeline to reduce connections.
         """
-
+        if not urls:
+            return
+        
         redis_key = self._get_redis_key(domain, taskId)
-
-        for url in urls:
-            redis_client.sadd(redis_key, url)
-            redis_client.expire(redis_key, self.redis_expire)
-
+        
+        # Use pipeline for bulk operations
+        with redis_client.pipeline() as pipe:
+            for url in urls:
+                pipe.sadd(redis_key, url)
+            pipe.expire(redis_key, self.redis_expire)
+            pipe.execute()  # Execute all commands in one network call
+        
         logger.info(f"Stored {len(urls)} URLs in Redis for {domain}.")
 
     ## Retrieve URLs from Redis
